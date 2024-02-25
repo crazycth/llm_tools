@@ -29,6 +29,20 @@ with warnings.catch_warnings():
     from scipy.integrate import quad as integrate
     from tqdm import tqdm
 
+# support chinese
+import jieba
+def _jieba_tokenize(x): return [w for w in jieba.lcut(x) if w.strip()]
+
+def remove_punctuation_and_numbers(text):
+    # 定义一个正则表达式，匹配非中文字符
+    # 这里的正则表达式 [\u4e00-\u9fff] 匹配所有中文字符
+    pattern = re.compile(r'[^\u4e00-\u9fff]')
+
+    # 使用正则表达式的 sub 方法替换掉非中文字符
+    clean_text = pattern.sub('', text)
+
+    return clean_text
+
 
 SEED = 42
 NON_ALPHA = re.compile("[^A-Za-z_0-9]")
@@ -90,6 +104,7 @@ def embed_func(
     hashranges: List[Tuple[int, int]],
     permutations: np.ndarray,
     min_ngram_size: int = 5,
+    language: str = 'en'
 ) -> Dict[str, Any]:
     """
     Combined with some datasketch code to better parallelize computation.
@@ -117,8 +132,13 @@ def embed_func(
         The hash values in each range and the index.
     """
     hashvalues = np.ones(num_perm, dtype=np.uint64) * MAX_HASH
-    tokens = {" ".join(t) for t in ngrams(NON_ALPHA.split(content), ngram_size, min_ngram_size)}
-    print(f"[INFO] tokens: {tokens}")
+    tokenize_result = _jieba_tokenize(content)
+    # print(f"[DEBUG] tokenize result: {tokenize_result}")
+    if language == 'en':
+        tokens = {" ".join(t) for t in ngrams(NON_ALPHA.split(content), ngram_size, min_ngram_size)}
+    else:
+        tokens = {" ".join(t) for t in ngrams(_jieba_tokenize(content), ngram_size, min_ngram_size)}
+
     hv = np.array([sha1_hash32(token.encode("utf-8")) for token in tokens], dtype=np.uint64)  # noqa: E501
     a, b = permutations
     phv = np.bitwise_and(((hv * np.tile(a, (len(hv), 1)).T).T + b) % MERSENNE_PRIME, MAX_HASH)  # noqa: E501
@@ -215,10 +235,11 @@ if __name__ == "__main__":
         cache_dir: str = typer.Option(".cache", help="Cache directory"),
         ngram_size: int = typer.Option(5, help="The ngram size to use for MinHash"),
         num_perm: int = typer.Option(256, help="Number of permutations"),
-        threshold: float = typer.Option(0.7, help="Minhash threshold"),
+        threshold: float = typer.Option(0.5, help="Minhash threshold"),
         min_ngram_size: int = typer.Option(5, help="Shorter documents will be removed"),
         output: str = typer.Option(None, help="Store the deduplicated dataset"),
-        watch: bool = typer.Option(None, help="Output filter example")
+        watch: bool = typer.Option(None, help="Output filter example"),
+        language:str = typer.Option("en", help="en or zh")
     ):
         global uf
         OUTPUT_BASE = Path(output or "output")
@@ -263,6 +284,15 @@ if __name__ == "__main__":
         ds = load_dataset('json',data_files=dataset,split="train")
         time_measures["load_dataset"] = time.time() - time_measures["load_dataset"]
 
+        if language == 'zh':
+            # ds = ds.map(
+            #     lambda example: {"feature": remove_punctuation_and_numbers(example["feature"])},
+            #     num_proc=os.cpu_count(),
+            #     new_fingerprint=str(random.getrandbits(128)),
+            #     desc="Applying remove_punctuation_and_numbers..."
+            # )
+            pass
+
         DATA_SIZE = len(ds)
         PERMUTATIONS = np.array(
             [
@@ -275,8 +305,6 @@ if __name__ == "__main__":
             dtype=np.uint64,
         ).T
 
-        # print(f"[DEBUG] permutation: {PERMUTATIONS}")
-
         time_measures["minhash"] = time.time()
         embeded = ds.map(
             function=embed_func,
@@ -286,6 +314,7 @@ if __name__ == "__main__":
                 "ngram_size": ngram_size,
                 "permutations": PERMUTATIONS,
                 "min_ngram_size": min_ngram_size,
+                "language": language
             },
             input_columns=[column],
             remove_columns=ds.column_names,
